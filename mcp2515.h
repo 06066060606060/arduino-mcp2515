@@ -296,6 +296,7 @@ class MCP2515
         static const uint8_t RXBnCTRL_RXM_STDEXT = 0x00;
         static const uint8_t RXBnCTRL_RXM_MASK   = 0x60;
         static const uint8_t RXBnCTRL_RTR        = 0x08;
+        static const uint8_t RXBnSIDL_SRR        = 0x10;
         static const uint8_t RXB0CTRL_BUKT       = 0x04;
         static const uint8_t RXB0CTRL_FILHIT_MASK = 0x03;
         static const uint8_t RXB1CTRL_FILHIT_MASK = 0x07;
@@ -465,6 +466,8 @@ class MCP2515
         void modifyRegister(const REGISTER reg, const uint8_t mask, const uint8_t data);
 
         void prepareId(uint8_t *buffer, const bool ext, const uint32_t id);
+        // The caller must validate the DLC and select a free transmit buffer.
+        ERROR sendMessageToBuffer(const TXBn txbn, const struct can_frame *frame);
     
     public:
         MCP2515(const uint8_t _CS, const uint32_t _SPI_CLOCK = DEFAULT_SPI_CLOCK, SPIClass * _SPI = nullptr);

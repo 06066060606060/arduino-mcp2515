@@ -1,47 +1,6 @@
 Arduino MCP2515 CAN interface library
 ---------------------------------------------------------
-[![Build Status](https://travis-ci.org/autowp/arduino-mcp2515.svg?branch=master)](https://travis-ci.org/autowp/arduino-mcp2515)
-
-<br>
-CAN-BUS is a common industrial bus because of its long travel distance, medium communication speed and high reliability. It is commonly found on modern machine tools and as an automotive diagnostic bus. This CAN-BUS Shield gives your Arduino/Seeeduino CAN-BUS capability. With an OBD-II converter cable added on and the OBD-II library imported, you are ready to build an onboard diagnostic device or data logger.
-
-- Implements CAN V2.0B at up to 1 Mb/s
-- SPI Interface up to 10 MHz
-- Standard (11 bit) and extended (29 bit) data and remote frames
-- Two receive buffers with prioritized message storage
-
-**Contents:**
-* [Hardware](#hardware)
-   * [CAN Shield](#can-shield)
-   * [Do It Yourself](#do-it-yourself)
-* [Software Usage](#software-usage)
-   * [Library Installation](#library-installation)
-   * [Initialization](#initialization)
-   * [Frame data format](#frame-data-format)
-   * [Send Data](#send-data)
-   * [Receive Data](#receive-data)
-   * [Set Receive Mask and Filter](#set-receive-mask-and-filter)
-   * [Examples](#examples)
-
-# Hardware:
-
-## CAN Shield
-
-The following code samples uses the CAN-BUS Shield, wired up as shown:
-
-![MCP2515 CAN-Shield wiring](examples/wiring.png)
-
-## Do It Yourself
-
-If you want to make your own CAN board for under $10, you can achieve that with something like this:
-
-![MCP2515 with MCP2551 wiring](examples/wiring-diy.png)
-
-Component References:
-* [MCP2515](https://www.microchip.com/wwwproducts/en/MCP2515) Stand-Alone CAN Controller with SPI Interface
-* [MCP2551](https://www.microchip.com/wwwproducts/en/MCP2551) High-speed CAN Transceiver - pictured above, however "not recommended for new designs"
-* [MCP2562](https://www.microchip.com/wwwproducts/en/MCP2562) High-speed CAN Transceiver with Standby Mode and VIO Pin - an updated tranceiver since the _MCP2551_ (requires different wiring, read datasheet for example, also [here](https://fragmuffin.github.io/howto-micropython/slides/index.html#/7/5))
-* [TJA1055](https://www.nxp.com/docs/en/data-sheet/TJA1055.pdf) Fault-tolerant low speed CAN Transceiver. Mostly used in vehicles.
+[Sources](https://travis-ci.org/autowp/arduino-mcp2515.svg?branch=master)](https://travis-ci.org/autowp/arduino-mcp2515)
 
 
 # Software Usage:
@@ -144,6 +103,10 @@ For additional information see [SocketCAN](https://www.kernel.org/doc/Documentat
 
 ## Send Data
 
+Both send overloads return `ERROR_ALLTXBUSY` if the selected transmit buffer
+(or all buffers for automatic selection) is busy. `ERROR_OK` means the transmit
+request was accepted; it does not confirm that transmission has completed.
+
 ```C++
 MCP2515::ERROR sendMessage(const MCP2515::TXBn txbn, const struct can_frame *frame);
 MCP2515::ERROR sendMessage(const struct can_frame *frame);
@@ -182,6 +145,12 @@ mcp2515.sendMessage(MCP2515::TXB1, &frame);
 
 
 ## Receive Data
+
+Frames with a DLC greater than eight are discarded: `readMessage()` returns
+`ERROR_FAIL` and releases the affected receive buffer so reception can continue.
+`clearRXnOVR()` clears receive overflow flags and the error interrupt flag only
+when an overflow is present; other interrupt flags remain unchanged. Inspect
+other error flags before calling it, since `ERRIF` is shared by error conditions.
 
 The following function is used to receive data on the 'receive' node:
 
@@ -264,6 +233,16 @@ MCP2515::ERROR setFilter(const RXF num, const bool ext, const uint32_t ulData)
 
 
 ## Examples
+
+The transmit/receive hot paths use the MCP2515's dedicated `LOAD TX BUFFER`,
+`RTS`, and `READ RX BUFFER` commands. Automatic transmission selects a free
+buffer with one `READ STATUS` transaction; receive flags are released at the end
+of the buffer read. Remote transmission does not write unused payload bytes.
+These commands follow sections 12.4, 12.6 and 12.7 of the
+[Microchip MCP2515 data sheet](https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP2515-Family-Data-Sheet-DS20001801K.pdf).
+See [host regression tests and SPI overhead measurements](tests/README.md) for
+validation and measured before/after counts. These changes preserve the public
+API and the configured CAN/SPI rates.
 
 Example implementation of CanHacker (lawicel) protocol based device: [https://github.com/autowp/can-usb](https://github.com/autowp/can-usb)
 

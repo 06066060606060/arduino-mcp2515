@@ -186,13 +186,18 @@ MCP2515::ERROR MCP2515::setMode(const CANCTRL_REQOP_MODE mode)
 {
     modifyRegister(MCP_CANCTRL, CANCTRL_REQOP | CANCTRL_OSM, mode);
 
-    unsigned long endTime = millis() + 10;
+    const unsigned long startTime = millis();
     bool modeMatch = false;
-    while (millis() < endTime) {
+    while (millis() - startTime < 10) {
         uint8_t newmode = readRegister(MCP_CANSTAT);
         newmode &= CANSTAT_OPMOD;
 
-        modeMatch = newmode == mode;
+        // OSM is a CANCTRL option, not part of CANSTAT's operation mode.
+        modeMatch = newmode == (mode & CANCTRL_REQOP);
+        if (modeMatch) {
+            modeMatch = (readRegister(MCP_CANCTRL) & CANCTRL_OSM)
+                        == (mode & CANCTRL_OSM);
+        }
 
         if (modeMatch) {
             break;
@@ -602,21 +607,42 @@ MCP2515::ERROR MCP2515::sendMessage(const TXBn txbn, const struct can_frame *fra
 
     const struct TXBn_REGS *txbuf = &TXB[txbn];
 
-    uint8_t data[13];
+    if (readRegister(txbuf->CTRL) & TXB_TXREQ) {
+        return ERROR_ALLTXBUSY;
+    }
+
+    return sendMessageToBuffer(txbn, frame);
+}
+
+MCP2515::ERROR MCP2515::sendMessageToBuffer(const TXBn txbn, const struct can_frame *frame)
+{
+    const struct TXBn_REGS *txbuf = &TXB[txbn];
+    uint8_t header[5];
 
     bool ext = (frame->can_id & CAN_EFF_FLAG);
     bool rtr = (frame->can_id & CAN_RTR_FLAG);
     uint32_t id = (frame->can_id & (ext ? CAN_EFF_MASK : CAN_SFF_MASK));
 
-    prepareId(data, ext, id);
+    prepareId(header, ext, id);
 
-    data[MCP_DLC] = rtr ? (frame->can_dlc | RTR_MASK) : frame->can_dlc;
+    header[MCP_DLC] = rtr ? (frame->can_dlc | RTR_MASK) : frame->can_dlc;
 
-    memcpy(&data[MCP_DATA], frame->data, frame->can_dlc);
+    startSPI();
+    SPIn->transfer(INSTRUCTION_LOAD_TX0 + 2 * txbn);
+    for (uint8_t i = 0; i < sizeof(header); i++) {
+        SPIn->transfer(header[i]);
+    }
+    // Remote frames carry a requested DLC but no data payload.
+    if (!rtr) {
+        for (uint8_t i = 0; i < frame->can_dlc; i++) {
+            SPIn->transfer(frame->data[i]);
+        }
+    }
+    endSPI();
 
-    setRegisters(txbuf->SIDH, data, 5 + frame->can_dlc);
-
-    modifyRegister(txbuf->CTRL, TXB_TXREQ, TXB_TXREQ);
+    startSPI();
+    SPIn->transfer(0x80 | (1 << txbn));
+    endSPI();
 
     uint8_t ctrl = readRegister(txbuf->CTRL);
     if ((ctrl & (TXB_ABTF | TXB_MLOA | TXB_TXERR)) != 0) {
@@ -631,13 +657,12 @@ MCP2515::ERROR MCP2515::sendMessage(const struct can_frame *frame)
         return ERROR_FAILTX;
     }
 
-    TXBn txBuffers[N_TXBUFFERS] = {TXB0, TXB1, TXB2};
-
-    for (int i=0; i<N_TXBUFFERS; i++) {
-        const struct TXBn_REGS *txbuf = &TXB[txBuffers[i]];
-        uint8_t ctrlval = readRegister(txbuf->CTRL);
-        if ( (ctrlval & TXB_TXREQ) == 0 ) {
-            return sendMessage(txBuffers[i], frame);
+    // READ STATUS reports all three TXREQ bits at positions 2, 4 and 6.
+    const uint8_t status = getStatus();
+    uint8_t busyMask = 0x04;
+    for (int i = 0; i < N_TXBUFFERS; i++, busyMask <<= 2) {
+        if ((status & busyMask) == 0) {
+            return sendMessageToBuffer(static_cast<TXBn>(i), frame);
         }
     }
 
@@ -646,37 +671,42 @@ MCP2515::ERROR MCP2515::sendMessage(const struct can_frame *frame)
 
 MCP2515::ERROR MCP2515::readMessage(const RXBn rxbn, struct can_frame *frame)
 {
-    const struct RXBn_REGS *rxb = &RXB[rxbn];
-
     uint8_t tbufdata[5];
 
-    readRegisters(rxb->SIDH, tbufdata, 5);
+    // Keep CS low through the header and payload. Raising CS clears only RXnIF.
+    startSPI();
+    SPIn->transfer(rxbn == RXB0 ? INSTRUCTION_READ_RX0 : INSTRUCTION_READ_RX1);
+    for (uint8_t i = 0; i < sizeof(tbufdata); i++) {
+        tbufdata[i] = SPIn->transfer(0x00);
+    }
+
+    uint8_t dlc = (tbufdata[MCP_DLC] & DLC_MASK);
+    if (dlc > CAN_MAX_DLEN) {
+        endSPI();
+        return ERROR_FAIL;
+    }
+    for (uint8_t i = 0; i < dlc; i++) {
+        frame->data[i] = SPIn->transfer(0x00);
+    }
+    endSPI();
 
     uint32_t id = (tbufdata[MCP_SIDH]<<3) + (tbufdata[MCP_SIDL]>>5);
 
-    if ( (tbufdata[MCP_SIDL] & TXB_EXIDE_MASK) ==  TXB_EXIDE_MASK ) {
+    const bool ext = (tbufdata[MCP_SIDL] & TXB_EXIDE_MASK) != 0;
+    if (ext) {
         id = (id<<2) + (tbufdata[MCP_SIDL] & 0x03);
         id = (id<<8) + tbufdata[MCP_EID8];
         id = (id<<8) + tbufdata[MCP_EID0];
         id |= CAN_EFF_FLAG;
     }
 
-    uint8_t dlc = (tbufdata[MCP_DLC] & DLC_MASK);
-    if (dlc > CAN_MAX_DLEN) {
-        return ERROR_FAIL;
-    }
-
-    uint8_t ctrl = readRegister(rxb->CTRL);
-    if (ctrl & RXBnCTRL_RTR) {
+    // Standard RTR is in SIDL.SRR; extended RTR is in DLC.RTR.
+    if (ext ? (tbufdata[MCP_DLC] & RTR_MASK) : (tbufdata[MCP_SIDL] & RXBnSIDL_SRR)) {
         id |= CAN_RTR_FLAG;
     }
 
     frame->can_id = id;
     frame->can_dlc = dlc;
-
-    readRegisters(rxb->DATA, frame->data, dlc);
-
-    modifyRegister(MCP_CANINTF, rxb->CANINTF_RXnIF, 0);
 
     return ERROR_OK;
 }
@@ -756,10 +786,9 @@ void MCP2515::clearTXInterrupts(void)
 void MCP2515::clearRXnOVR(void)
 {
 	uint8_t eflg = getErrorFlags();
-	if (eflg != 0) {
+	if (eflg & (EFLG_RX0OVR | EFLG_RX1OVR)) {
 		clearRXnOVRFlags();
-		clearInterrupts();
-		//modifyRegister(MCP_CANINTF, CANINTF_ERRIF, 0);
+		clearERRIF();
 	}
 	
 }
