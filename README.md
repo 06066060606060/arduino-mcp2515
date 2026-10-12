@@ -253,7 +253,8 @@ For more information, please refer to [wiki page](http://www.seeedstudio.com/wik
 ----
 
 This software is written by loovee ([luweicong@seeed.cc](luweicong@seeed.cc "luweicong@seeed.cc")) for seeed studio,<br>
-Updated by Dmitry ([https://github.com/autowp](https://github.com/autowp "https://github.com/autowp"))<br>
+Updated by Dmitry ([https://github.com/autowp](https://github.com/autowp "https://github.com/autowp")) & Xbmod<br>
+
 and is licensed under [The MIT License](http://opensource.org/licenses/mit-license.php). Check [LICENSE.md](LICENSE.md) for more information.<br>
 
 Contributing to this software is warmly welcomed. You can do this basically by<br>
