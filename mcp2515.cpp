@@ -38,6 +38,18 @@ void MCP2515::endSPI() {
     SPIn->endTransaction();
 }
 
+void MCP2515::transferSPI(uint8_t *buffer, const uint8_t n) {
+#if defined(ARDUINO_ARCH_ESP32)
+    // Use the hardware FIFO within the existing, locked SPI transaction.
+    // Padding is storage only: exactly n bytes are clocked on the bus.
+    SPIn->transferBytes(buffer, buffer, n);
+#else
+    for (uint8_t i = 0; i < n; i++) {
+        buffer[i] = SPIn->transfer(buffer[i]);
+    }
+#endif
+}
+
 MCP2515::ERROR MCP2515::reset(void)
 {
     startSPI();
@@ -91,65 +103,76 @@ MCP2515::ERROR MCP2515::reset(void)
 
 uint8_t MCP2515::readRegister(const REGISTER reg)
 {
+    alignas(4) uint8_t buffer[4] = {INSTRUCTION_READ, static_cast<uint8_t>(reg), 0, 0};
     startSPI();
-    SPIn->transfer(INSTRUCTION_READ);
-    SPIn->transfer(reg);
-    uint8_t ret = SPIn->transfer(0x00);
+    transferSPI(buffer, 3);
     endSPI();
 
-    return ret;
+    return buffer[2];
 }
 
 void MCP2515::readRegisters(const REGISTER reg, uint8_t values[], const uint8_t n)
 {
+    alignas(4) uint8_t buffer[16] = {INSTRUCTION_READ, static_cast<uint8_t>(reg)};
+    uint8_t offset = 0;
+    uint8_t prefix = 2;
     startSPI();
-    SPIn->transfer(INSTRUCTION_READ);
-    SPIn->transfer(reg);
-    // mcp2515 has auto-increment of address-pointer
-    for (uint8_t i=0; i<n; i++) {
-        values[i] = SPIn->transfer(0x00);
-    }
+    // MCP2515 auto-increments the address while CS remains low.
+    do {
+        const uint8_t remaining = n - offset;
+        const uint8_t capacity = sizeof(buffer) - prefix;
+        const uint8_t count = remaining < capacity ? remaining : capacity;
+        transferSPI(buffer, prefix + count);
+        if (count) memcpy(values + offset, buffer + prefix, count);
+        offset += count;
+        prefix = 0;
+        memset(buffer, 0, sizeof(buffer));
+    } while (offset < n);
     endSPI();
 }
 
 void MCP2515::setRegister(const REGISTER reg, const uint8_t value)
 {
+    alignas(4) uint8_t buffer[4] = {INSTRUCTION_WRITE, static_cast<uint8_t>(reg), value, 0};
     startSPI();
-    SPIn->transfer(INSTRUCTION_WRITE);
-    SPIn->transfer(reg);
-    SPIn->transfer(value);
+    transferSPI(buffer, 3);
     endSPI();
 }
 
 void MCP2515::setRegisters(const REGISTER reg, const uint8_t values[], const uint8_t n)
 {
+    alignas(4) uint8_t buffer[16] = {INSTRUCTION_WRITE, static_cast<uint8_t>(reg)};
+    uint8_t offset = 0;
+    uint8_t prefix = 2;
     startSPI();
-    SPIn->transfer(INSTRUCTION_WRITE);
-    SPIn->transfer(reg);
-    for (uint8_t i=0; i<n; i++) {
-        SPIn->transfer(values[i]);
-    }
+    do {
+        const uint8_t remaining = n - offset;
+        const uint8_t capacity = sizeof(buffer) - prefix;
+        const uint8_t count = remaining < capacity ? remaining : capacity;
+        if (count) memcpy(buffer + prefix, values + offset, count);
+        transferSPI(buffer, prefix + count);
+        offset += count;
+        prefix = 0;
+    } while (offset < n);
     endSPI();
 }
 
 void MCP2515::modifyRegister(const REGISTER reg, const uint8_t mask, const uint8_t data)
 {
+    alignas(4) uint8_t buffer[4] = {INSTRUCTION_BITMOD, static_cast<uint8_t>(reg), mask, data};
     startSPI();
-    SPIn->transfer(INSTRUCTION_BITMOD);
-    SPIn->transfer(reg);
-    SPIn->transfer(mask);
-    SPIn->transfer(data);
+    transferSPI(buffer, sizeof(buffer));
     endSPI();
 }
 
 uint8_t MCP2515::getStatus(void)
 {
+    alignas(4) uint8_t buffer[4] = {INSTRUCTION_READ_STATUS, 0, 0, 0};
     startSPI();
-    SPIn->transfer(INSTRUCTION_READ_STATUS);
-    uint8_t i = SPIn->transfer(0x00);
+    transferSPI(buffer, 2);
     endSPI();
 
-    return i;
+    return buffer[1];
 }
 
 MCP2515::ERROR MCP2515::setConfigMode()
@@ -617,7 +640,9 @@ MCP2515::ERROR MCP2515::sendMessage(const TXBn txbn, const struct can_frame *fra
 MCP2515::ERROR MCP2515::sendMessageToBuffer(const TXBn txbn, const struct can_frame *frame)
 {
     const struct TXBn_REGS *txbuf = &TXB[txbn];
-    uint8_t header[5];
+    alignas(4) uint8_t buffer[16] = {};
+    uint8_t *header = buffer + 1;
+    buffer[0] = INSTRUCTION_LOAD_TX0 + 2 * txbn;
 
     bool ext = (frame->can_id & CAN_EFF_FLAG);
     bool rtr = (frame->can_id & CAN_RTR_FLAG);
@@ -627,17 +652,11 @@ MCP2515::ERROR MCP2515::sendMessageToBuffer(const TXBn txbn, const struct can_fr
 
     header[MCP_DLC] = rtr ? (frame->can_dlc | RTR_MASK) : frame->can_dlc;
 
-    startSPI();
-    SPIn->transfer(INSTRUCTION_LOAD_TX0 + 2 * txbn);
-    for (uint8_t i = 0; i < sizeof(header); i++) {
-        SPIn->transfer(header[i]);
-    }
     // Remote frames carry a requested DLC but no data payload.
-    if (!rtr) {
-        for (uint8_t i = 0; i < frame->can_dlc; i++) {
-            SPIn->transfer(frame->data[i]);
-        }
-    }
+    const uint8_t payloadLength = rtr ? 0 : frame->can_dlc;
+    if (payloadLength) memcpy(buffer + 6, frame->data, payloadLength);
+    startSPI();
+    transferSPI(buffer, 6 + payloadLength);
     endSPI();
 
     startSPI();
@@ -671,22 +690,23 @@ MCP2515::ERROR MCP2515::sendMessage(const struct can_frame *frame)
 
 MCP2515::ERROR MCP2515::readMessage(const RXBn rxbn, struct can_frame *frame)
 {
-    uint8_t tbufdata[5];
+    alignas(4) uint8_t buffer[8] = {};
+    buffer[0] = rxbn == RXB0 ? INSTRUCTION_READ_RX0 : INSTRUCTION_READ_RX1;
+    const uint8_t *tbufdata = buffer + 1;
 
     // Keep CS low through the header and payload. Raising CS clears only RXnIF.
     startSPI();
-    SPIn->transfer(rxbn == RXB0 ? INSTRUCTION_READ_RX0 : INSTRUCTION_READ_RX1);
-    for (uint8_t i = 0; i < sizeof(tbufdata); i++) {
-        tbufdata[i] = SPIn->transfer(0x00);
-    }
+    transferSPI(buffer, 6);
 
     uint8_t dlc = (tbufdata[MCP_DLC] & DLC_MASK);
     if (dlc > CAN_MAX_DLEN) {
         endSPI();
         return ERROR_FAIL;
     }
-    for (uint8_t i = 0; i < dlc; i++) {
-        frame->data[i] = SPIn->transfer(0x00);
+    if (dlc) {
+        alignas(4) uint8_t payload[8] = {};
+        transferSPI(payload, dlc);
+        memcpy(frame->data, payload, dlc);
     }
     endSPI();
 

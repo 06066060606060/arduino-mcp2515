@@ -456,6 +456,9 @@ class MCP2515
 
         void startSPI();
         void endSPI();
+        // In-place exchange; buffer must be 4-byte aligned and padded to a
+        // multiple of 4 bytes for the ESP32 HAL's word-sized FIFO accesses.
+        void transferSPI(uint8_t *buffer, const uint8_t n);
 
         ERROR setMode(const CANCTRL_REQOP_MODE mode);
 
